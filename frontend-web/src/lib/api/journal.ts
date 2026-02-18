@@ -11,6 +11,8 @@ export interface JournalEntry {
   stress_level?: number; // 1-10 scale
   tags?: string[];
   patterns?: string[]; // AI-detected emotional patterns
+  created_at: string;
+  updated_at: string;
 }
 
 export interface JournalListResponse {

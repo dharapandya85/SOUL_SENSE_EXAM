@@ -1,196 +1,168 @@
+'use client';
 
-import {useState, useEffect, useCallback} from "react";
+import { useState, useCallback, useMemo } from 'react';
+import { useApi } from './useApi';
+import { journalApi, JournalEntry, JournalFilters, CreateJournalEntry } from '@/lib/api/journal';
 
-export interface JournalEntry {
-    id: number;
-    content: string;
-    mood_rating: number;
-    energy_level: number;
-    stress_level: number;
-    tags: string[];
-    sentiment_score: number;
-    created_at: string;
-    updated_at: string;
-}
-export interface JournalQueryParams {
-    page?: number;
-    per_page?: number;
-    start_date?: string;
-    end_date?: string;
-    mood_min?: number;
-    mood_max?: number;
-    tags?: string[];
-    search?: string;
-}
-interface JournalResponse {
-    entries: JournalEntry[];
-    total: number;
-    page: number;
-    per_page: number;
+interface UseJournalOptions {
+  page?: number;
+  limit?: number;
+  filters?: JournalFilters;
 }
 
-const API_BASE = "/api/v1/journal";
+interface UseJournalReturn {
+  entries: JournalEntry[];
+  total: number;
+  loading: boolean;
+  error: string | null;
+  page: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPrevPage: boolean;
+  setPage: (page: number) => void;
+  setFilters: (filters: JournalFilters) => void;
+  filters: JournalFilters;
+  refetch: () => void;
+  loadMore: () => void; // for infinite scroll
 
-export function useJournal(initialParams: JournalQueryParams = {}) {
-    const [entries, setEntries] = useState<JournalEntry[]>([]);
-    const [entry, setEntry] = useState<JournalEntry | null>(null);
-    const [total, setTotal] = useState(0);
-    const [params, setParams] = useState<JournalQueryParams>(initialParams);
-    const [isLoading, setIsLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+  fetchEntry: (id:number) => Promise<JournalEntry>;
+  createEntry: (data: CreateJournalEntry) => Promise<JournalEntry>;
+  updateEntry: (id:number, data: Partial<CreateJournalEntry>) => Promise<JournalEntry>;
+  deleteEntry: (id: number) => Promise<void>;
+}
 
-    //build query string
-    const buildQueryString = (params: JournalQueryParams) =>{
-        const query = new URLSearchParams();
+export function useJournal(options: UseJournalOptions = {}): UseJournalReturn {
+  const [page, setPage] = useState(options.page || 1);
+  const [filters, setFilters] = useState<JournalFilters>(options.filters || {});
+  const limit = options.limit || 10;
+  const [entriesState, setEntries] = useState<JournalEntry[]>([]);
+  const [entry, setEntry] = useState<JournalEntry | null>(null);
+  
+  const {
+    data,
+    loading,
+    error,
+    refetch,
+  } = useApi({
+    apiFn: () => journalApi.listEntries(page, limit, filters),
+    deps: [page, filters],
+  });
 
-        (Object.keys(params) as (keyof JournalQueryParams)[]).forEach((key)=>{
-            const value = params[key];
-            if(value === undefined || value === null) return;
+  const entries = data?.entries || entriesState;
+  const total = data?.total || 0;
+  const totalPages = Math.ceil(total / limit);
 
-            if(key=== "tags" && Array.isArray(value)) {
-                query.append("tags", value.join(","));
-            } else {
-                query.append(key, String(value));
-            }
-        });
-        return query.toString();
-    };
-    //Fetch list
-    const fetchEntries = useCallback(async()=>{
-        setIsLoading(true);
-        setError(null);
+  const hasNextPage = page < totalPages;
+  const hasPrevPage = page > 1;
 
-        try {
-            const queryString = buildQueryString(params);
-            const res = await fetch(`${API_BASE}?${queryString}`);
-            if (!res.ok) throw new Error("Failed to fetch entries");
+  const handleSetPage = useCallback((newPage: number) => {
+    setPage(newPage);
+  }, []);
 
-            const data: JournalResponse = await res.json();
-            setEntries(data.entries);
-            setTotal(data.total);
-        } catch(err: any){
-            setError(err.message);
-        } finally {
-            setIsLoading(false);
-        }
-    }, [params]);
+  const handleSetFilters = useCallback((newFilters: JournalFilters) => {
+    setFilters(newFilters);
+    setPage(1); // Reset to first page when filters change
+  }, []);
 
-    //Fetch single entry
-    const fetchEntry = async (id: number)=>{
-        setIsLoading(true);
-        setError(null);
+  const loadMore = useCallback(() => {
+    if (hasNextPage && !loading) {
+      setPage(prev => prev + 1);
+    }
+  }, [hasNextPage, loading]);
 
-        try {
-            //const queryString = buildQueryString(params);
-            const res = await fetch(`${API_BASE}/${id}`);
-            if (!res.ok) throw new Error("Failed to fetch entry");
-
-            const data = await res.json();
-            setEntry(data);
-            //setTotal(data.total);
-        } catch(err: any){
-            setError(err.message);
-        } finally {
-            setIsLoading(false);
-        }
-    };
+  //fetch single entry
+    const fetchEntry = useCallback(async(id:number) =>{
+        const result = await journalApi.getEntry(id);
+        setEntry(result);
+        return result;
+    }, []);
+    
     //create entry 
-    const createEntry = async(newEntry: Partial<JournalEntry>)=>{
+    const createEntry = useCallback(async(newEntry: CreateJournalEntry)=>{
         const tempId = Date.now();
 
         const optimisticEntry: JournalEntry = {
             id: tempId,
-            content: newEntry.content || "",
-            mood_rating: newEntry.mood_rating || 0,
-            energy_level: newEntry.energy_level || 0,
-            stress_level: newEntry.stress_level || 0,
-            tags: newEntry.tags || [],
+            content: newEntry.content,
+            mood_rating: 0,
+            energy_level: newEntry.energy_level ?? 0,
+            stress_level: newEntry.stress_level ?? 0,
+            tags: newEntry.tags ?? [],
             sentiment_score: 0,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
         };
-        setEntries((prev: JournalEntry[])=> [optimisticEntry, ...prev]);
+        setEntries(prev => [optimisticEntry, ...prev]);
 
         try {
-            const res = await fetch(API_BASE,{
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(newEntry),
-            });
-            if(!res.ok) throw new Error("Failed to create entry");
+            
+            const saved = await journalApi.createEntry(newEntry);
 
-            const saved = await res.json();
-
-            setEntries((prev: JournalEntry[]) =>
-                prev.map((e: JournalEntry) => (e.id === tempId? saved : e))
+            setEntries(prev =>
+                prev.map(e => (e.id === tempId? saved : e))
             );
             return saved;
-        } catch(err: any) {
-            setEntries((prev: JournalEntry[])=> prev.filter((e)=>e.id!==tempId));
-            setError(err.message);
+        } catch(err) {
+            setEntries(prev =>
+                 prev.filter(e=>e.id!==tempId)
+            );
             throw err;
         }
-    };
+    },[]);
     //update entry 
-    const updateEntry = async(id: number, updates: Partial<JournalEntry>)=>{
+    const updateEntry = useCallback(async(id: number, updates: Partial<CreateJournalEntry>)=>{
         const previous = entries;
 
-        setEntries((prev: JournalEntry[])=> 
-           prev.map((e: JournalEntry) => (e.id === id ? {...e, ...updates}: e))
+        setEntries(prev=> 
+           prev.map(e => (e.id === id ? {...e, ...updates}: e))
     );
 
         try {
-            const res = await fetch(`${API_BASE}/${id}`,{
-                method: "PUT",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify(updates),
-            });
-            if(!res.ok) throw new Error("Failed to update entry");
+            //if(!res.ok) throw new Error("Failed to update entry");
 
-            const updated = await res.json();
+            const updated = await journalApi.updateEntry(id, updates);
 
-            setEntries((prev: JournalEntry[]) =>
-                prev.map((e: JournalEntry) => (e.id === id? updated : e))
+            setEntries(prev =>
+                prev.map(e=> (e.id === id? updated : e))
             );
             return updated;
         } catch(err: any) {
             setEntries(previous);
-            setError(err.message);
             throw err;
         }
-    };
+    },[entries]);
     //delete entry
-    const deleteEntry = async(id: number)=>{
+    const deleteEntry = useCallback(async(id: number)=>{
         const previous = entries;
 
-        setEntries((prev: JournalEntry[])=> 
-           prev.filter((e) => e.id !== id));
+        setEntries(prev=> 
+           prev.filter(e => e.id !== id));
         try {
-            const res = await fetch(`${API_BASE}/${id}`,{
-                method: "DELETE",
-                
-            });
-            if(!res.ok) throw new Error("Failed to delete entry");
+            await journalApi.deleteEntry(id);
+           
         } catch(err: any) {
             setEntries(previous);
-            setError(err.message);
             throw err;
         }
-    };
-    useEffect(()=>{
-        fetchEntries();
-    }, [fetchEntries]);
-    return {
-        entries,
-        entry,
-        total,
-        page: params.page,
-        per_page: params.per_page,
-        isLoading,
-        error,
-        setParams,
-        fetchEntry,
-        createEntry,
-        updateEntry,
-        deleteEntry,
-    };
+    },[entries]);
+  return {
+    entries,
+    total,
+    loading,
+    error,
+    page,
+    totalPages,
+    hasNextPage,
+    hasPrevPage,
+    setPage: handleSetPage,
+    setFilters: handleSetFilters,
+    filters,
+    refetch,
+    loadMore,
+    fetchEntry,
+    createEntry,
+    updateEntry,
+    deleteEntry,
+    
+  };
+}
